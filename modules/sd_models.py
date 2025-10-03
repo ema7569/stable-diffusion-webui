@@ -4,7 +4,8 @@ import os
 import sys
 import threading
 import enum
-
+import time
+import hashlib #nohash_patch require hashlib
 import torch
 import re
 import safetensors.torch
@@ -150,31 +151,35 @@ def checkpoint_tiles(use_short=False):
     return [x.short_title if use_short else x.title for x in checkpoints_list.values()]
 
 
-def list_models():
-    checkpoints_list.clear()
-    checkpoint_aliases.clear()
+#def list_models():
+#    checkpoints_list.clear()
+#    checkpoint_aliases.clear()
 
-    cmd_ckpt = shared.cmd_opts.ckpt
-    if shared.cmd_opts.no_download_sd_model or cmd_ckpt != shared.sd_model_file or os.path.exists(cmd_ckpt):
-        model_url = None
-        expected_sha256 = None
-    else:
-        model_url = f"{shared.hf_endpoint}/runwayml/stable-diffusion-v1-5/resolve/main/v1-5-pruned-emaonly.safetensors"
-        expected_sha256 = '6ce0161689b3853acaa03779ec93eafe75a02f4ced659bee03f50797806fa2fa'
+#    cmd_ckpt = shared.cmd_opts.ckpt
+#    if shared.cmd_opts.no_download_sd_model or cmd_ckpt != shared.sd_model_file or os.path.exists(cmd_ckpt):
+#        model_url = None
+#        expected_sha256 = None
+#    else:
+#        model_url = f"{shared.hf_endpoint}/runwayml/stable-diffusion-v1-5/resolve/main/v1-5-pruned-emaonly.safetensors"
+#        expected_sha256 = '6ce0161689b3853acaa03779ec93eafe75a02f4ced659bee03f50797806fa2fa'
 
-    model_list = modelloader.load_models(model_path=model_path, model_url=model_url, command_path=shared.cmd_opts.ckpt_dir, ext_filter=[".ckpt", ".safetensors"], download_name="v1-5-pruned-emaonly.safetensors", ext_blacklist=[".vae.ckpt", ".vae.safetensors"], hash_prefix=expected_sha256)
+#    model_list = modelloader.load_models(model_path=model_path, model_url=model_url, command_path=shared.cmd_opts.ckpt_dir, ext_filter=[".ckpt", ".safetensors"], download_name="v1-5-pruned-emaonly.safetensors", ext_blacklist=[".vae.ckpt", ".vae.safetensors"], hash_prefix=expected_sha256)
 
-    if os.path.exists(cmd_ckpt):
-        checkpoint_info = CheckpointInfo(cmd_ckpt)
-        checkpoint_info.register()
+#    if os.path.exists(cmd_ckpt):
+#        checkpoint_info = CheckpointInfo(cmd_ckpt)
+#        checkpoint_info.register()
 
-        shared.opts.data['sd_model_checkpoint'] = checkpoint_info.title
-    elif cmd_ckpt is not None and cmd_ckpt != shared.default_sd_model_file:
-        print(f"Checkpoint in --ckpt argument not found (Possible it was moved to {model_path}: {cmd_ckpt}", file=sys.stderr)
+#        shared.opts.data['sd_model_checkpoint'] = checkpoint_info.title
+#    elif cmd_ckpt is not None and cmd_ckpt != shared.default_sd_model_file:
+#        print(f"Checkpoint in --ckpt argument not found (Possible it was moved to {model_path}: {cmd_ckpt}", file=sys.stderr)
 
-    for filename in model_list:
-        checkpoint_info = CheckpointInfo(filename)
-        checkpoint_info.register()
+#    for filename in model_list:
+#        checkpoint_info = CheckpointInfo(filename)
+#        checkpoint_info.register()
+
+
+
+
 
 
 re_strip_checksum = re.compile(r"\s*\[[^]]+]\s*$")
@@ -202,10 +207,9 @@ def get_closet_checkpoint_match(search_string):
 
 def model_hash(filename):
     """old hash that only looks at a small part of the file and is prone to collisions"""
-
     try:
         with open(filename, "rb") as file:
-            import hashlib
+            #import hashlib
             m = hashlib.sha256()
 
             file.seek(0x100000)
@@ -282,31 +286,29 @@ def get_state_dict_from_checkpoint(pl_sd):
 
 
 def read_metadata_from_safetensors(filename):
-    import json
+	import json
+	res = {}
 
-    with open(filename, mode="rb") as file:
-        metadata_len = file.read(8)
-        metadata_len = int.from_bytes(metadata_len, "little")
-        json_start = file.read(2)
+	with open(filename, mode="rb") as file:
+		metadata_len = file.read(8)
+		metadata_len = int.from_bytes(metadata_len, "little")
+		json_start = file.read(2)
+		assert metadata_len > 2 and json_start in (b'{"', b"{'"), f"{filename} is not a safetensors file"
 
-        assert metadata_len > 2 and json_start in (b'{"', b"{'"), f"{filename} is not a safetensors file"
+		try:
+			json_data = json_start + file.read(metadata_len-2)
+			json_obj = json.loads(json_data)
+			for k, v in json_obj.get("__metadata__", {}).items():
+				res[k] = v
+				if isinstance(v, str) and v[0:1] == '{':
+					try:
+						res[k] = json.loads(v)
+					except Exception:
+						pass
+		except Exception:
+			errors.report(f"Error reading metadata from file: {filename}", exc_info=True)
 
-        res = {}
-
-        try:
-            json_data = json_start + file.read(metadata_len-2)
-            json_obj = json.loads(json_data)
-            for k, v in json_obj.get("__metadata__", {}).items():
-                res[k] = v
-                if isinstance(v, str) and v[0:1] == '{':
-                    try:
-                        res[k] = json.loads(v)
-                    except Exception:
-                        pass
-        except Exception:
-             errors.report(f"Error reading metadata from file: {filename}", exc_info=True)
-
-        return res
+	return res
 
 
 def read_state_dict(checkpoint_file, print_global_state=False, map_location=None):
@@ -1032,3 +1034,106 @@ def apply_token_merging(sd_model, token_merging_ratio):
         )
 
     sd_model.applied_token_merged_ratio = token_merging_ratio
+
+# --- BEGIN nohash_patch ---
+
+def deterministic_hash(s):
+	return hashlib.md5(s.encode('utf-8')).hexdigest()
+
+def fake_model_hash(filename):
+	fname = filename
+	bname = os.path.basename(fname)
+	hash = deterministic_hash(bname)
+	
+	print("fake_model_hash " + fname + " " + bname + " " + hash)
+	
+	return hash
+
+def fake_calculate_shorthash(self):
+	fname = self.filename
+	bname = os.path.basename(fname)
+	hash = deterministic_hash(bname)[0:10]
+	
+	print("fake_calculate_shorthash " + fname + " " + bname + " " + hash)
+	
+	return hash
+
+def fake_calculate_sha256(filename):
+	fname = filename
+	bname = os.path.basename(fname)
+	hash = deterministic_hash(bname)
+	
+	print("fake_calculate_sha256 " + fname + " " + bname + " " + hash)
+	return hash
+
+#replace list_models from sd_models.py 
+#instead of reloading all models this one just add/remove the difference
+#def fake_list_models():
+def list_models():
+	# remove original clear
+	# checkpoints_list.clear()
+	# checkpoint_aliases.clear()
+	start = time.time()
+	print("**** fake_list_models ****", file=sys.stderr, flush=True)
+	cmd_ckpt = shared.cmd_opts.ckpt
+	if shared.cmd_opts.no_download_sd_model or cmd_ckpt != shared.sd_model_file or os.path.exists(cmd_ckpt):
+		model_url = None
+		expected_sha256 = None
+	else:
+		model_url = f"{shared.hf_endpoint}/runwayml/stable-diffusion-v1-5/resolve/main/v1-5-pruned-emaonly.safetensors"
+		expected_sha256 = '6ce0161689b3853acaa03779ec93eafe75a02f4ced659bee03f50797806fa2fa'
+
+	model_list = benchmark(modelloader.load_models, model_path=model_path, model_url=model_url, command_path=shared.cmd_opts.ckpt_dir, ext_filter=[".ckpt", ".safetensors"],
+	download_name="v1-5-pruned-emaonly.safetensors", ext_blacklist=[".vae.ckpt", ".vae.safetensors"],hash_prefix=expected_sha256)
+
+	model_list = modelloader.load_models(model_path=model_path, model_url=model_url, command_path=shared.cmd_opts.ckpt_dir, ext_filter=[".ckpt", ".safetensors"],
+	download_name="v1-5-pruned-emaonly.safetensors", ext_blacklist=[".vae.ckpt", ".vae.safetensors"],hash_prefix=expected_sha256)
+
+	# special case where a model also come in cmd_ckpt
+	if os.path.exists(cmd_ckpt) and cmd_ckpt not in checkpoints_list:
+		checkpoint_info = CheckpointInfo(cmd_ckpt)
+		checkpoint_info.register()
+		shared.opts.data['sd_model_checkpoint'] = checkpoint_info.title
+	elif cmd_ckpt is not None and cmd_ckpt != shared.default_sd_model_file and not os.path.exists(cmd_ckpt):
+		print(f"Checkpoint in --ckpt argument not found (maybe moved to {model_path}: {cmd_ckpt}", file=sys.stderr)
+
+	# Clean missing models
+	for fname in list(checkpoints_list.keys()):
+		if fname not in model_list:
+			del checkpoints_list[fname]
+			# Also clean alias
+			to_delete_aliases = [a for a, f in checkpoint_aliases.items() if f == fname]
+			for a in to_delete_aliases:
+				del checkpoint_aliases[a]
+
+	# Add new models
+	for filename in model_list:
+		if filename not in checkpoints_list:
+			checkpoint_info = CheckpointInfo(filename)
+			checkpoint_info.register()
+
+	elapsed = time.time() - start
+	print(f"[BENCHMARK list_models()] Execution time {elapsed:.4f}s", file=sys.stderr, flush=True)
+
+def fake_read_metadata_from_safetensors(filename):
+	return {}
+
+def benchmark(func, *args, **kwargs):
+	#call a func with args and print elapsed time 
+	start = time.time()
+	result = func(*args, **kwargs)
+	elapsed = time.time() - start
+	print(f"[BENCHMARK**************************] {func.__name__} Execution time {elapsed:.4f}s", file=sys.stderr, flush=True)
+	return result
+
+
+hashes.calculate_sha256 = fake_calculate_sha256
+model_hash = fake_model_hash
+calculate_shorthash = fake_calculate_shorthash
+read_metadata_from_safetensors = fake_read_metadata_from_safetensors
+
+#list_models = fake_list_models
+print("[Extensions/nohash_patch.py]: Patched at import time")
+
+# --- END nohash_patch ---
+
